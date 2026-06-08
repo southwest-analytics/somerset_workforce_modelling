@@ -1,0 +1,814 @@
+---
+title: "Somerset ICB Demand Modelling Summary"
+subtitle: "Using Quality and Outcomes Framework (QOF) Prevalence"
+author: "Richard Blackwell"
+format:
+  revealjs:
+    logo: HISW_Logo_RGB_Positive.png
+    theme: [default, hisw.scss]
+    embed-resources: true
+    code-copy: false
+    view-distance: 10
+---
+
+```{r}
+#| echo: false
+#| warning: false
+
+library(tidyverse)
+library(readxl)
+library(plotly)
+library(ggiraph)
+
+# Ensure directory is correct
+if(tolower(basename(getwd()))!="somerset_icb")
+  setwd("./somerset_icb")
+
+# Load input data ----
+QOF <- FALSE
+
+if(QOF){
+  filename <- "./input/qof_input.xlsx"
+  sim_filename <- "simulation_grouped_qof.csv"
+  sim_zipfile <- "./output/qof/simulation_grouped_qof.zip"
+} else {
+  filename <- "./input/gbd_input.xlsx"
+  sim_filename <- "simulation_grouped_gbd.csv"
+  sim_zipfile <- "./output/gbd/simulation_grouped_gbd.zip"
+}
+  
+popn_sheet <- "POPN"
+popn_growth_sheet <- "GROWTH"
+prev_sheet <- "PREV"
+odds_ratio_sheet <- "OR"
+conditions_sheet <- "COND"
+
+# Load population data ----
+df_popn <- readxl::read_xlsx(path = filename, sheet = popn_sheet)
+
+# Load population growth data ----
+df_popn_growth <- readxl::read_xlsx(path = filename, sheet = popn_growth_sheet)
+
+# Load prevalence data ----
+df_prev <- readxl::read_xlsx(path = filename, sheet = prev_sheet) %>%
+  pivot_wider(id_cols = "IDX", names_from = "COND", values_from = "PREV", values_fill = 0)
+
+# Load odds ratio data ----
+df_or <- readxl::read_xlsx(path = filename, sheet = odds_ratio_sheet)
+
+# Load condition name lookup ----
+df_cond <- readxl::read_xlsx(path = filename, sheet = conditions_sheet)
+
+# Load benchmark population ----
+age_bands <- c(paste0(str_sub(paste0("0", seq(0, 89, 5)), -2), "_", str_sub(paste0("0", seq(4, 89, 5)), -2)), "90_PLUS", "90_PLUS")
+names(age_bands) <- c(paste0(seq(0, 90, 5), "_", seq(4, 94, 5)), "95+")
+
+df_benchmark_popn <- read.csv("./input/gp-reg-pat-prac-quin-age.csv") %>%
+  filter(ORG_TYPE=="Comm Region" & SEX!="ALL" & AGE_GROUP_5!="ALL") %>% 
+  mutate(IDX = paste0(str_sub(SEX, 1, 1), "|", unname(age_bands[AGE_GROUP_5])), SIZE = NUMBER_OF_PATIENTS, .keep = "none") %>%
+  group_by(IDX) %>%
+  summarise(SIZE = sum(SIZE)) %>%
+  ungroup()
+
+# Load grouped simulation data
+df_sim <- read.csv(unzip(zipfile = sim_zipfile, files = sim_filename))
+
+# Remove unzipped file
+ret <- file.remove(sim_filename)
+```
+
+
+## Inputs
+
+The inputs for the demand modelling consist of
+
+- Target population
+- Population growth estimate
+- Prevalence estimate
+- Multi-morbidity estimate
+
+## Initial Population {.smaller}
+
+```{r}
+#| echo: false
+#| warning: false
+
+df_plot_data <- df_popn %>% 
+  mutate(
+    AREA = "Somerset ICB",
+    GENDER = str_sub(IDX, 1, 1),
+    AGE_BAND = str_sub(IDX, 3),
+    AGE_BAND_LABEL = if_else(str_sub(IDX, 3)=="90_PLUS", "90+", gsub("_", "-", AGE_BAND)),
+    SIZE, PCT = SIZE/sum(SIZE),
+    LABEL = sprintf("<b>%s</b><br>%s<br>%s (%.1f%%)",
+                    AREA, paste0(if_else(GENDER=="F", "Female", "Male"), " ", AGE_BAND_LABEL),
+                    prettyNum(SIZE, digits = 1, big.mark = ","), PCT*100),
+    .keep = "none") %>%
+  bind_rows(df_benchmark_popn %>% 
+              mutate(
+                AREA = "England",
+                GENDER = str_sub(IDX, 1, 1),
+                AGE_BAND = str_sub(IDX, 3),
+                AGE_BAND_LABEL = if_else(str_sub(IDX, 3)=="90_PLUS", "90+", gsub("_", "-", AGE_BAND)),
+                SIZE, PCT = SIZE/sum(SIZE),
+                LABEL = sprintf("<b>%s</b><br>%s<br>%s (%.1f%%)",
+                                AREA, paste0(if_else(GENDER=="F", "Female", "Male"), " ", AGE_BAND_LABEL),
+                                prettyNum(SIZE, digits = 1, big.mark = ","), PCT*100),
+            .keep = "none"))
+
+# Ensure consistent category order for age bands:
+age_bands_cat <- unique(if_else(unname(age_bands)=="90_PLUS", "90+", gsub("_","-",unname(age_bands))))
+tick_vals  <- pretty(c(-max(df_plot_data$PCT), max(df_plot_data$PCT)))
+tick_text  <- scales::percent(abs(tick_vals))
+chart_title <- "Population Pyramid of<br>NHS Somerset ICB vs England"
+
+
+plt_popn <- plot_ly() %>%
+  add_trace(
+    data = df_plot_data %>% filter(AREA == "Somerset ICB"),
+    x = ~if_else(GENDER=="M", PCT, -PCT),
+    y = ~AGE_BAND_LABEL,
+    text = ~LABEL,
+    color = ~GENDER,
+    colors = c("M" = "#293894", "F" = "#00abbd"),
+    type = "bar",
+    orientation = "h",
+    textposition = "none",
+    hovertemplate = "%{text}<extra></extra>"
+  ) %>%
+  add_trace(
+    data = df_plot_data %>% filter(AREA == "England"),
+    name = "England",
+    x = ~if_else(GENDER=="M", PCT, -PCT),
+    y = ~AGE_BAND_LABEL,
+    text = ~LABEL,
+    marker = list(color = "#ffffff64",
+                  line = list(color = "#211752", width = 1.5)),
+    type = "bar",
+    orientation = "h",
+    textposition = "none",
+    hovertemplate = "%{text}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    barmode = "overlay",
+    xaxis = list(
+      title = "% of Population",
+      tickmode = "array",
+      tickvals = tick_vals,
+      ticktext = tick_text,
+      zeroline = TRUE
+    ),
+    yaxis = list(
+      title = "Age Band",
+      categoryorder = "array",
+      categoryarray = age_bands_cat
+    ),
+    legend = list(orientation = "h", x = 0, y = -0.05),
+    margin = list(l = 70, r = 30, t = 50, b = 40)
+  )
+```
+
+:::: {.columns}
+
+::: {.column style="width: 30%; font-size: 18px;"}
+
+The initial population is the NHS Somerset Integrated Care Board population as at 2025 by gender and 5 year age band^[[NHS Digital Patients Registered at a GP Practice](https://digital.nhs.uk/data-and-information/publications/statistical/patients-registered-at-a-gp-practice)]
+
+From the population pyramid we can see that there is a lower proportion of under 50-year-olds in the Somerset population, and notably lower in the 20-49 year old working age population and conversely a higher proportion of over 50-year-olds.
+
+:::
+
+::: {.column width="70%"}
+
+```{r}
+#| fig.width: 4
+#| fig.height: 6
+#| out-width: 100%
+
+plt_popn %>% config(responsive = TRUE)
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+::::
+
+## Population Growth {.smaller}
+
+```{r}
+#| echo: false
+#| warning: false
+
+df_plot_data <- df_popn %>%
+  left_join(df_popn_growth, by = "IDX") %>%
+  mutate(
+    YEAR,
+    GENDER = str_sub(IDX, 1, 1),
+    AGE_BAND = str_sub(IDX, 3),
+    AGE_BAND_LABEL = if_else(str_sub(IDX, 3)=="90_PLUS", "90+", gsub("_", "-", AGE_BAND)),
+    SIZE = SIZE * (1 + PCT_GROWTH),
+    .keep = "none") %>%
+  group_by(YEAR) %>%
+  mutate(PCT = SIZE/sum(SIZE)) %>%
+  ungroup() %>%
+  mutate(
+    LABEL = sprintf("<b>%s</b><br>%s<br>%s (%.1f%%)",
+                    YEAR, paste0(if_else(GENDER=="F", "Female", "Male"), " ", AGE_BAND_LABEL),
+                    prettyNum(SIZE, digits = 1, big.mark = ","), PCT*100))
+
+chart_title <- sprintf("Population Pyramid Projection<br>for Somerset ICB")
+  
+# Ensure consistent category order for age bands:
+# Age levels as above
+tick_vals  <- pretty(c(-max(df_plot_data$SIZE), max(df_plot_data$SIZE)))
+tick_text  <- prettyNum(abs(tick_vals), digits = 1, big.mark = ",")
+
+plt_popn_proj <- df_plot_data %>%
+  plot_ly(
+    x = ~if_else(GENDER=="M", SIZE, -SIZE),
+    y = ~AGE_BAND_LABEL,
+    frame = ~YEAR,
+    text = ~LABEL,
+    color = ~GENDER,
+    colors = c("M" = "#293894", "F" = "#00abbd"),
+    type = "bar",
+    orientation = "h",
+    textposition = "none",
+    hovertemplate = "%{text}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    barmode = "relative",
+    xaxis = list(
+      title = "Population Size",
+      tickmode = "array",
+      tickvals = tick_vals,
+      ticktext = tick_text,
+      zeroline = TRUE
+    ),
+    yaxis = list(
+      title = "Age Band",
+      categoryorder = "array",
+      categoryarray = age_bands_cat
+    ),
+    legend = list(orientation = "h", x = 0, y = -0.05),
+    margin = list(l = 70, r = 30, t = 50, b = 40)
+  ) %>%
+  animation_opts(frame = 400, easing = "cubic-in-out", redraw = FALSE) %>%
+  animation_slider(currentvalue = list(prefix = "Year: "))
+```
+
+:::: {.columns}
+
+::: {.column style="width: 30%; font-size: 18px;"}
+
+The population projection at gender and 5 year age band at ICB level^[[ONS Population Projections for sub-Integrated Care Boards by Single Year of Age and Sex](https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationprojections/datasets/populationprojectionsforsubintegratedcareboardsbysingleyearofageandsexengland)] is is used to forecast the current population from 2022 to 2047.
+
+Click play to see the annual population projection.
+
+The population of Somerset gets noticeably older each year, for example as of 2025 a quarter (25.4%) of the Somerset population were aged 65 and over, by 2047 that is expected to be 30.1% and this is even more clear for the older age groups, for example as of 2025 around 7.4% of the population were aged 80 and over, by 2047 that is expected to be 12%.
+
+:::
+
+::: {.column width="70%"}
+
+```{r}
+#| fig.height: 6
+#| out-width: 100%
+
+plt_popn_proj %>% config(responsive = TRUE) 
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+:::: 
+
+## Prevalence {.smaller}
+
+```{r}
+#| echo: false
+#| warning: false
+
+conditions_short_names <- df_cond$COND
+conditions_long_names <- df_cond$COND_LONG
+names(conditions_long_names) <- conditions_short_names
+
+df_plot_data <- df_prev %>% 
+  pivot_longer(cols = 2:NCOL(.), names_to = "COND", values_to = "PREV") %>%
+  mutate(GENDER = str_sub(IDX, 1, 1),
+         AGE_BAND = str_sub(IDX, 3),
+         AGE_BAND_LABEL = if_else(str_sub(IDX, 3)=="90_PLUS", "90+", gsub("_", "-", AGE_BAND)),
+         COND_SHORT = COND, COND_LONG = unname(conditions_long_names[COND]),
+         PREV, .keep = "none") %>%
+  mutate(LABEL = sprintf("<b>[%s] - %s</b><br>%s %s<br>%.2f%%",
+                         COND_SHORT, COND_LONG, 
+                         if_else(GENDER=="F", "Female", "Male"), AGE_BAND_LABEL,
+                         PREV*100))
+
+chart_title = "Prevalence by 5 Year Age Band for Females"
+plt_prev_female <- plot_ly(data = df_plot_data %>% filter(GENDER == "F")) %>%
+  add_trace(type = "bar", 
+            x = ~AGE_BAND_LABEL, 
+            y = ~PREV, 
+            color = ~COND_SHORT,
+            text = ~LABEL,
+            textposition = "none",
+            hovertemplate = "%{text}<extra></extra>") %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    font = list(size = 9),
+    barmode = "group",
+    xaxis = list(
+      title = "Age Band"
+    ),
+    yaxis = list(
+      title = "Prevalence",
+      tickformat = ".1%",
+      zeroline = TRUE
+    ),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+        itemclick="toggleothers",
+        itemdoubleclick="toggleothers"
+    )
+  )
+
+chart_title = "Prevalence by 5 Year Age Band for Males"
+plt_prev_male <- plot_ly(data = df_plot_data %>% filter(GENDER == "M")) %>%
+  add_trace(type = "bar", 
+            x = ~AGE_BAND_LABEL, 
+            y = ~PREV, 
+            color = ~COND_SHORT,
+            text = ~LABEL,
+            textposition = "none",
+            hovertemplate = "%{text}<extra></extra>") %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    font = list(size = 9),
+    barmode = "group",
+    xaxis = list(
+      title = "Age Band"
+    ),
+    yaxis = list(
+      title = "Prevalence",
+      tickformat = ".1%",
+      zeroline = TRUE
+    ),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+      itemclick="toggleothers",
+      itemdoubleclick="toggleothers"
+    )
+  )
+```
+
+:::: {.rows}
+
+::: {.row style="width: 100%; height: 20%; font-size: medium;"}
+
+From these charts we can see the impact age has on prevalence for each of the conditions and by gender. The left hand chart shows the **female** prevalence then right the **male**. Clicking on the condition in the legend will show the chart for just that condition, click again to reset to all conditions.
+
+:::
+
+::: {.row style="height: 80%;"}
+
+::: {.column style="width: 50%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 6
+#| out-width: 100%
+
+plt_prev_female %>% config(responsive = TRUE) 
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+
+:::
+
+::: {.column style="width: 50%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 6
+#| out-width: 100%
+
+plt_prev_male %>% config(responsive = TRUE) 
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+:::
+
+::::
+
+
+## Odds Ratios {.smaller}
+
+```{r}
+#| echo: false
+#| warning: false
+
+mat_names <- levels(as.factor(c(df_or$COND_I, df_or$COND_J)))
+
+mat <- matrix(data = NA, nrow = length(mat_names), ncol = length(mat_names), dimnames = list(mat_names, mat_names))
+
+for(i in 1:NROW(df_or)){
+  mat[df_or$COND_I[i], df_or$COND_J[i]] <- df_or$OR[i]
+  mat[df_or$COND_J[i], df_or$COND_I[i]] <- df_or$OR[i]
+}
+
+df_plot_data <- mat %>%
+  as_tibble() %>% 
+  mutate(COND_I = mat_names, .before = 1) %>%
+  pivot_longer(-COND_I, names_to = "COND_J", values_to = "OR") %>%
+  mutate(
+    COND_I_LONG = unname(conditions_long_names[COND_I]),
+    COND_J_LONG = unname(conditions_long_names[COND_J]),
+    COND_I = factor(COND_I, levels = names(conditions_long_names)),
+    COND_J = factor(COND_J, levels = rev(names(conditions_long_names)))
+  ) %>%
+  mutate(LABEL = if_else(is.na(OR), 
+                         "", 
+                         sprintf("<b>[%s] - %s<br>[%s] - %s</b><br>OR = %.2f",
+                         COND_I, COND_I_LONG, COND_J, COND_J_LONG, OR)))
+
+plt_odd_ratios <- ggplot(df_plot_data, aes(x = COND_I, y = COND_J, tooltip = LABEL)) +
+  theme_bw(base_size = 10) + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Pairwise Odds Ratios for Conditions", x = "Condition A", y = "Condition B") + 
+  guides(fill = guide_none()) +
+  ggiraph::geom_tile_interactive(aes(fill = log(OR))) +
+  geom_text(aes(label = round(OR, 1))) +
+  scale_x_discrete(position = "top") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = log(1), na.value = "grey80")
+
+plt_odd_ratios_interactive <- ggiraph::girafe(ggobj = plt_odd_ratios, width_svg = 8)
+plt_odd_ratios_interactive <- girafe_options(
+  plt_odd_ratios_interactive,
+  opts_tooltip(
+    css = "background-color: rgba(255,255,255,0.95); color: black; padding: 10px 12px;
+        border-radius: 8px; font-size: 13px; font-family: Arial, Helvetica, sans-serif;
+        box-shadow: 0px 2px 6px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);"))
+```
+
+:::: {.columns}
+
+::: {.column style="width: 30%; font-size: medium"}
+
+The following chart shows the odds ratios between conditions
+
+- An odds ratio of **zero** indicates a perfect negative relationship, i.e. if condition A is present then it is **impossible** that condition B is present.
+- Odds ratios of **greater than 0 and less than 1** indicate a negative relationship, i.e. if condition A is present then it is **less** likely that condition B is present, with the strength of the relationship reducing as the value increases.
+- An odds ratio of **one** indicates **independence** i.e. the presence of condition A had no impact on the likelihood of condition B being present.
+- An odds ratio of **greater than 1** indicates a positive relationship i.e. if condition A is present then it is **more** likely that condition B is present, with the strength of the relationship increasing as the value increases.
+
+:::
+
+::: {.column style="width: 70%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 8
+#| out-width: 100%
+
+plt_odd_ratios_interactive %>% config(responsive = TRUE)
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+::::
+
+## Modelled Prevalence
+
+```{r}
+#| echo: false
+#| warning: false
+
+df_plot_data <- df_sim %>% 
+  mutate(across(all_of(setdiff(names(.), c("STRATA", "YEAR", "COUNT"))), .fns = function(x){x*COUNT})) %>%
+  group_by(YEAR) %>%
+  summarise(across(all_of(setdiff(names(.), c("STRATA", "YEAR", "COUNT"))), .fns = sum)) %>%
+  ungroup() %>%
+  pivot_longer(cols = all_of(setdiff(names(.), c("YEAR", "SIZE"))), names_to = "COND", values_to = "REGISTER") %>%
+  mutate(COND_LONG = unname(conditions_long_names[COND]),
+         PREV = REGISTER/SIZE,
+         POPN = SIZE,
+         LABEL = sprintf("%s<br><b>[%s] - %s</b><br>Prevalence = %.2f%% (%s of %s)",
+                         YEAR, COND, COND_LONG, 
+                         PREV * 100,
+                         prettyNum(REGISTER, digits = 1, big.mark = ","),
+                         prettyNum(POPN, digits = 1, big.mark = ","))) %>% 
+  select(YEAR, COND, COND_LONG, REGISTER, POPN, PREV, LABEL)
+
+chart_title = "Modelled Prevalence by Year and Condition"
+
+plt_modelled_prev <- plot_ly(
+  data = df_plot_data,
+  x = ~YEAR,
+  y = ~PREV,
+  text = ~LABEL,
+  color = ~COND,
+  type = "scatter",
+  mode = "lines",
+  textposition = "none",
+  hovertemplate = "%{text}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    font = list(size = 9),
+    xaxis = list(title = "Year"),
+    yaxis = list(
+      title = "Prevalence",
+      tickformat = ".2%"),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+      itemclick="toggleothers",
+      itemdoubleclick="toggleothers"
+    )
+)
+```
+
+:::: {.columns}
+
+::: {.column style="width: 30%; font-size: medium"}
+
+The following chart shows the modelled prevalence by year and condition. 
+
+We can see for the majority of conditions there is a general upward trend for the prevalence, which is expected as there is a forecast increase in the overall age of the population and the prevalence of most conditions increases with age.
+
+Clicking on the condition in the legend will show the chart for just that condition, click again to reset to all conditions.
+
+:::
+
+::: {.column style="width: 70%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 8
+#| out-width: 100%
+
+plt_modelled_prev %>% config(responsive = TRUE) 
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+::::
+
+## Modelled Multimorbidity - Segmentation
+
+```{r}
+#| echo: false
+#| warning: false
+
+max_count <- max(df_sim$COUNT)
+
+df_glenday <- data.frame(COUNT = 0:max_count) %>%
+  left_join(
+    df_sim %>% 
+      filter(YEAR==2025) %>%
+      group_by(COUNT) %>% 
+      summarise(SIZE = sum(SIZE)) %>% 
+      ungroup(),
+    by = "COUNT") %>%
+  replace_na(replace = list(SIZE = 0)) %>%
+  mutate(PCT = SIZE/sum(SIZE),
+         CUM_PCT = cumsum(PCT),
+         LABEL = sprintf("<b>Condition Count = %d</b><br>Percentage = %.2f%% (%s of %s)<br>Cumulative Percentage = %.2f%%", COUNT, PCT*100, SIZE, sum(SIZE), CUM_PCT*100))
+
+# Calculate distance from Glenday sieve percentages
+green_break <- which.min(abs(df_glenday$CUM_PCT - 0.5))
+yellow_break <- which.min(abs(df_glenday$CUM_PCT - 0.95))
+blue_break <- which.min(abs(df_glenday$CUM_PCT - 0.99))
+
+# Create breaks
+glenday_breaks <- c(-1, green_break-1, yellow_break-1, blue_break-1, max_count)
+
+df_sim$SEGMENT <- factor(cut(df_sim$COUNT, breaks = glenday_breaks, labels = c("GREEN", "YELLOW", "BLUE", "RED")), levels = c("GREEN", "YELLOW", "BLUE", "RED"))
+
+df_sim$SEGMENT_LABEL <- cut(df_sim$COUNT, 
+                            breaks = glenday_breaks, 
+                            labels = c(sprintf("GREEN [<=%d]", green_break-1),
+                                       sprintf("YELLOW [>%d AND <=%d]", green_break-1, yellow_break-1),
+                                       sprintf("BLUE [>%d AND <=%d]", yellow_break-1, blue_break-1),
+                                       sprintf("RED [>%d AND <=%d]", blue_break-1, max_count)))
+
+df_plot_data <- df_sim %>% 
+  mutate(COUNT) %>%
+  filter(YEAR==2025) %>%
+  group_by(YEAR, COUNT, SEGMENT, SEGMENT_LABEL) %>% 
+  summarise(SIZE = sum(SIZE), .groups = "keep") %>%
+  ungroup() %>%
+  mutate(PCT = SIZE/sum(SIZE),
+         CUM_PCT = cumsum(PCT),
+         LABEL = sprintf("<b>Condition Count = %d<br>%s</b><br>Percentage = %.2f%% (%s of %s)<br>Cumulative Percentage = %.2f%%", 
+                         COUNT, SEGMENT_LABEL, PCT*100, 
+                         prettyNum(SIZE, digits = 1, big.mark = ","), 
+                         prettyNum(sum(SIZE), digits = 1, big.mark = ","), 
+                         CUM_PCT*100))
+
+# Create charts - Overall
+
+chart_title = "Modelled Population by Condition Count and Segment"
+
+plt_segmentation_overall <- plot_ly(
+  data = df_plot_data,
+  x = ~COUNT,
+  y = ~SIZE,
+  color = ~SEGMENT,
+  colors = c("GREEN" = 'forestgreen', "YELLOW" = 'goldenrod', "BLUE" = 'royalblue', "RED" = "darkred"),
+  customdata = ~LABEL,
+  type = "bar",
+  textposition = "none",
+  hovertemplate = "%{customdata}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    barmode = "group",
+    font = list(size = 9),
+    xaxis = list(title = "Condition Count",
+                 tickmode = "array",
+                 tickvals = (0:max_count)),
+    yaxis = list(
+      title = "Population Size",
+      tickformat = ","),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+      itemclick="toggleothers",
+      itemdoubleclick="toggleothers"
+    )
+)
+
+# Create charts - Glenday
+
+chart_title = "Modelled Population by Segment"
+
+df_plot_data <- df_sim %>% 
+  mutate(COUNT) %>%
+  filter(YEAR==2025) %>%
+  group_by(YEAR, SEGMENT, SEGMENT_LABEL) %>% 
+  summarise(SIZE = sum(SIZE), .groups = "keep") %>%
+  ungroup() %>%
+  mutate(PCT = SIZE/sum(SIZE),
+         CUM_PCT = cumsum(PCT),
+         LABEL = sprintf("<b>%s</b><br>Percentage = %.2f%% (%s of %s)<br>Cumulative Percentage = %.2f%%", 
+                         SEGMENT_LABEL, PCT*100, 
+                         prettyNum(SIZE, digits = 1, big.mark = ","), 
+                         prettyNum(sum(SIZE), digits = 1, big.mark = ","), 
+                         CUM_PCT*100))
+
+plt_segmentation_glenday <- plot_ly(
+  data = df_plot_data,
+  x = ~SEGMENT,
+  y = ~SIZE,
+  color = ~SEGMENT_LABEL,
+  colors = c('forestgreen', 'goldenrod', 'royalblue', "darkred"),
+  customdata = ~LABEL,
+  type = "bar",
+  textposition = "none",
+  hovertemplate = "%{customdata}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    font = list(size = 9),
+    xaxis = list(title = "Segment"),
+    yaxis = list(
+      title = "Population Size",
+      tickformat = ","),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+      itemclick="toggleothers",
+      itemdoubleclick="toggleothers"
+    )
+)
+```
+:::: {.rows}
+
+::: {.row style="height: 20%; font-size: medium"}
+
+The following charts the segmentation by condition and the overall segment sizes.
+
+:::
+
+::: {.row style="height: 80%;"}
+
+::: {.column style="width: 50%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 8
+#| out-width: 100%
+
+plt_segmentation_overall %>% config(responsive = TRUE) 
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+::: {.column style="width: 50%;"}
+
+```{r} 
+#| echo: false
+#| warning: false
+#| fig-width: 8
+#| out-width: 100%
+
+plt_segmentation_glenday %>% config(responsive = TRUE)
+# %>% htmlwidgets::onRender("function(el){setTimeout(() => Plotly.Plots.resize(el), 0);}")
+```
+
+:::
+
+:::
+
+::::
+
+## Modelled Multimorbidity - Forecast
+
+```{r}
+#| echo: false
+#| warning: false
+
+# Create charts - Glenday
+
+chart_title = "Modelled Population Forecast by Segment"
+
+df_plot_data <- df_sim %>% 
+  mutate(COUNT) %>%
+  group_by(YEAR, SEGMENT, SEGMENT_LABEL) %>% 
+  summarise(SIZE = sum(SIZE), .groups = "keep") %>%
+  ungroup() %>%
+  group_by(YEAR) %>%  
+  mutate(PCT = SIZE/sum(SIZE),
+         CUM_PCT = cumsum(PCT),
+         LABEL = sprintf("<b>%d<br>%s</b><br>Percentage = %.2f%% (%s of %s)", 
+                         YEAR, SEGMENT_LABEL, PCT*100, 
+                         prettyNum(SIZE, digits = 1, big.mark = ","), 
+                         prettyNum(sum(SIZE), digits = 1, big.mark = ",")))
+
+plt_segmentation_forecast <- plot_ly(
+  data = df_plot_data,
+  x = ~YEAR,
+  y = ~PCT,
+  color = ~SEGMENT_LABEL,
+  colors = c('forestgreen', 'goldenrod', 'royalblue', "darkred"),
+  customdata = ~LABEL,
+  type = "scatter",
+  mode = "line",
+  textposition = "none",
+  hovertemplate = "%{customdata}<extra></extra>"
+  ) %>%
+  layout(
+    autosize = TRUE,
+    title = chart_title,
+    font = list(size = 9),
+    xaxis = list(title = "Year"),
+    yaxis = list(
+      title = "% of Population",
+      tickformat = ".2%"),
+    margin = list(l = 70, r = 30, t = 50, b = 40),
+    legend=list(
+      itemclick="toggleothers",
+      itemdoubleclick="toggleothers"
+    )
+)
+```
+
+:::: {.columns}
+
+::: {.column style="width: 30%; font-size: large"}
+
+The chart shown here shows the forecast for each segment for each year.
+
+We can see the decreasing proportion of green segment and increasing proportion of yellow, blue and red segments indicating increased demand for health services.
+:::
+
+::: {.column style="width: 70%;"}
+
+```{r}
+#| fig-height: 6
+#| out-width: 100%
+
+plt_segmentation_forecast
+```
+
+:::
+
+::::
